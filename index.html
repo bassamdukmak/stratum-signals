@@ -402,6 +402,62 @@ footer { border-top:1px solid var(--border); padding:24px 40px; text-align:cente
   .stat:nth-child(-n+4) { border-bottom:1px solid var(--border); }
   .settings-box { padding:24px 22px; }
 }
+
+/* ── Phone layout (<=768px). Appended last so it wins over the 900/500px
+   blocks above at the same specificity; desktop (>768px) is untouched. ── */
+@media (max-width:768px) {
+  html, body { overflow-x:hidden; }
+
+  /* Stat sheet: one column, numbers stay readable. */
+  .stats { grid-template-columns:1fr; }
+  .stat { border-right:none !important; border-bottom:1px solid var(--border); }
+  .stat:last-child { border-bottom:none; }
+
+  /* Equity chart full width, tiles stacked below it (portfolio-body already
+     collapses to 1fr at 900px; this just tightens the gap/padding). */
+  .portfolio-body { gap:16px; }
+  #sparkline { min-height:200px; }
+
+  /* Filter rows: force-wrap into a compact, tappable stack instead of
+     relying on flex-wrap alone once labels + buttons no longer fit a row. */
+  .filters { padding:12px 16px; gap:10px; }
+  .filter-group { gap:8px; }
+
+  /* Signal cards: one column (grid already goes 1fr at 900px), less padding. */
+  .card { padding:16px 18px; }
+  .price-block { grid-template-columns:repeat(3,1fr); }
+
+  /* Weekly/Monthly cadence table scrolls inside its own box instead of
+     forcing the page wide. #cadence-panel already wraps the table (it's the
+     existing .live-stats mount point), so this needs no new markup: give
+     that mount the overflow and let the table keep its natural (wider than
+     viewport) width so there is something to scroll. */
+  #cadence-panel { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .cadence-table { width:max-content; min-width:100%; }
+  .cadence-detail-inner { grid-template-columns:1fr; }
+
+  /* Tap targets >=36px tall. */
+  .action-btn, .filter-btn, .toggle-btn, .sort-select, .settings-btn,
+  .portfolio-toggle, .price-chart-controls .settings-btn {
+    padding-top:10px; padding-bottom:10px; min-height:36px;
+  }
+
+  /* Body/label text never below 11px. */
+  .settings-row label, .settings-row .hint, .settings-note, .loading-progress,
+  .timestamp, .action-btn, .header-sub, .stat-label, .stat-detail,
+  .portfolio-toggle, .portfolio-cohorts, .chart-tip, .live-stats-title,
+  .live-stats-caption, .live-stats-counts, .live-stat-label,
+  .analytics-sub, .analytics-table th, .analytics-note, .analytics-block-title,
+  .analytics-mini-card .lbl, .analytics-mini-card .sub, .diagnostic-row,
+  .filter-group-label, .filter-btn, .filter-count, .toggle-btn, .sort-select,
+  .cadence-two .sub-val, .cadence-table, .cadence-table th,
+  .cadence-detail-inner h4, .cadence-pick .why, .cadence-note,
+  .card-date, .card-window, .earlier-mark, .badge, .meta-row, .no-data,
+  .price-cell .lbl, .price-cell .sub, .return-item .lbl, .progress-info,
+  footer {
+    font-size:11px;
+  }
+}
 </style>
 </head>
 <body>
