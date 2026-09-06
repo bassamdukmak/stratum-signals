@@ -604,7 +604,7 @@ var SNAPSHOT = __SNAPSHOT_JSON__;
 // Bumped by hand on every edit. Printed at the top of the load log so a browser
 // serving a stale copy of this file can be spotted immediately instead of being
 // mistaken for a fix that did not work.
-var DASHBOARD_BUILD = '2026-09-06.77';
+var DASHBOARD_BUILD = '2026-09-06.78';
 
 var LS_KEYS = 'stratum_signal_viewer_keys_v2';
 
@@ -3627,12 +3627,17 @@ function cadenceCurve(picks, barsByTicker, sessions) {
   picks.forEach(function(p) {
     var series = barsByTicker[p.ticker];
     if (!series || !series.length) return;
-    var entry = null;
+    var entry = null, entryIdx = -1;
     for (var i = 0; i < series.length; i++) {
-      if (series[i].date <= p.startDate) entry = series[i]; else break;
+      if (series[i].date <= p.startDate) { entry = series[i]; entryIdx = i; } else break;
     }
     if (!entry || !entry.close) return;
-    positions.push({ ticker: p.ticker, start: entry.date, entry: entry.close, sign: p.short ? -1 : 1 });
+    // Held for exactly CADENCE_FIXED_SESSIONS after entry, counted the way cadenceReturn
+    // counts them, so the curve answers the same question as the fixed-window tiles. Held
+    // to the end of data instead, every pick becomes a market tracker (measured 2026-09-06:
+    // both books 0.88 correlated with SPY, 23 of 28 kept tickers also open in cut).
+    var exit = series[entryIdx + CADENCE_FIXED_SESSIONS];
+    positions.push({ ticker: p.ticker, start: entry.date, end: exit ? exit.date : null, entry: entry.close, sign: p.short ? -1 : 1 });
   });
   if (!positions.length) return [];
   var byTicker = {};
@@ -3648,7 +3653,7 @@ function cadenceCurve(picks, barsByTicker, sessions) {
   sessions.forEach(function(day) {
     var sum = 0, open = 0;
     positions.forEach(function(p) {
-      if (day <= p.start) return;
+      if (day <= p.start || (p.end && day > p.end)) return;
       open++;
       var q = byTicker[p.ticker] && byTicker[p.ticker][day];
       if (!q) return;
@@ -3661,6 +3666,24 @@ function cadenceCurve(picks, barsByTicker, sessions) {
   return out;
 }
 
+// weekly_scores writes direction null on cut rows, so a name the daily called bearish
+// would be scored long here while kept rows honour BEARISH. The daily Top-5 stance is
+// already in memory (state.rows, signal_outcome), so the cut row borrows the most recent
+// one from the 7 days before the period started. No daily stance in that window: long.
+function dailyStanceIsShort(ticker, startDate) {
+  var from = new Date(startDate + 'T00:00:00Z');
+  from.setUTCDate(from.getUTCDate() - 7);
+  from = from.toISOString().slice(0, 10);
+  var latest = null;
+  (state.rows || []).forEach(function(r) {
+    if (r.ticker !== ticker || r.signal_section !== 'top5') return;
+    var day = String(r.report_date || '').slice(0, 10);
+    if (day < from || day > startDate) return;
+    if (!latest || day > latest.day) latest = { day: day, direction: String(r.direction || '').toLowerCase() };
+  });
+  return !!latest && latest.direction === 'bearish';
+}
+
 // Every pick of the selected cadence, flattened into the two books the chart compares.
 function cadenceCurveBooks() {
   var scored = cadenceState.scored || [];
@@ -3670,7 +3693,8 @@ function cadenceCurveBooks() {
       kept.push({ ticker: r.ticker, startDate: s.period.startDate, short: r.direction === 'BEARISH' });
     });
     s.cut.forEach(function(r) {
-      cut.push({ ticker: r.ticker, startDate: s.period.startDate, short: r.direction === 'BEARISH' });
+      cut.push({ ticker: r.ticker, startDate: s.period.startDate,
+        short: r.direction ? r.direction === 'BEARISH' : dailyStanceIsShort(r.ticker, s.period.startDate) });
     });
   });
   return { kept: kept, cut: cut };
@@ -6167,7 +6191,7 @@ function drawSparkline() {
       legend.className = 'portfolio-cohort'; legend.style.color = color;
       var last = points[points.length - 1];
       legend.textContent = cadenceMode
-        ? cohort.month + ' ' + fmtPct(last.pct) + ' (' + last.n + ')'
+        ? cohort.month + ' ' + fmtPct(last.pct) + ' (' + last.n + ') \u00b7 ' + CADENCE_FIXED_SESSIONS + '-session hold'
         : cohort.month;
       cohortLegend.appendChild(legend);
     }
