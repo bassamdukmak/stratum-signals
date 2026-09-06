@@ -151,6 +151,7 @@ header {
 .portfolio-actions { display:flex; align-items:baseline; gap:12px; }
 .portfolio-toggle { background:none; border:1px solid var(--border); color:var(--muted); cursor:pointer; font-family:'IBM Plex Mono',monospace; font-size:9px; letter-spacing:1px; padding:4px 7px; }
 .portfolio-toggle.active { border-color:var(--gold); color:var(--gold); }
+.chart-range { display:inline-flex; gap:4px; }
 .portfolio-cohorts { display:flex; flex-wrap:wrap; gap:5px 12px; margin:-3px 0 8px; font-family:'IBM Plex Mono',monospace; font-size:9px; letter-spacing:1px; }
 .portfolio-cohort { white-space:nowrap; }
 .portfolio-body { display:grid; grid-template-columns:minmax(0,1fr) 430px; gap:24px; align-items:stretch; }
@@ -436,6 +437,10 @@ footer { border-top:1px solid var(--border); padding:24px 40px; text-align:cente
   .cadence-table { width:max-content; min-width:100%; }
   .cadence-detail-inner { grid-template-columns:1fr; }
 
+  /* Chart header: the caption and the buttons wrap onto their own rows instead of
+     pushing the range control past the right edge of a 375px screen. */
+  .portfolio-head, .portfolio-actions { flex-wrap:wrap; }
+
   /* Tap targets >=36px tall. */
   .action-btn, .filter-btn, .toggle-btn, .sort-select, .settings-btn,
   .portfolio-toggle, .price-chart-controls .settings-btn {
@@ -556,6 +561,7 @@ footer { border-top:1px solid var(--border); padding:24px 40px; text-align:cente
       <div class="portfolio-actions">
         <div class="portfolio-current" id="portfolio-current">—</div>
         <button class="portfolio-toggle" id="portfolio-toggle" type="button">COHORT VIEW</button>
+        <span class="chart-range" id="chart-range"><button class="portfolio-toggle" type="button" data-range="30">30D</button><button class="portfolio-toggle" type="button" data-range="90">90D</button><button class="portfolio-toggle" type="button" data-range="0">ALL</button></span>
       </div>
     </div>
     <div class="portfolio-body">
@@ -598,12 +604,18 @@ var SNAPSHOT = __SNAPSHOT_JSON__;
 // Bumped by hand on every edit. Printed at the top of the load log so a browser
 // serving a stale copy of this file can be spotted immediately instead of being
 // mistaken for a fix that did not work.
-var DASHBOARD_BUILD = '2026-09-04.76';
+var DASHBOARD_BUILD = '2026-09-06.77';
 
 var LS_KEYS = 'stratum_signal_viewer_keys_v2';
 
 // SNAPSHOT build: no embedded keys. Every Supabase read below short-circuits on
 // `if (SNAPSHOT)` and serves the rows captured into the <script> above this one.
+
+// Chart range in calendar days; 0 is all-time. Remembered per browser so the choice
+// survives a reload.
+var LS_CHART_RANGE = 'stratum_chart_range';
+var chartRangeDays = 0;
+try { chartRangeDays = Number(localStorage.getItem(LS_CHART_RANGE)) || 0; } catch (e) {}
 
 var state = {
   source: 'all', status: 'any', horizon: 'any', window: 'any', engine: 'any',
@@ -5555,6 +5567,13 @@ function wireFilterEvents() {
     state.portfolioView = state.portfolioView === 'cohorts' ? 'blended' : 'cohorts';
     drawSparkline();
   });
+  document.querySelectorAll('#chart-range button').forEach(function(b) {
+    b.addEventListener('click', function() {
+      chartRangeDays = Number(b.getAttribute('data-range'));
+      try { localStorage.setItem(LS_CHART_RANGE, String(chartRangeDays)); } catch (e) {}
+      drawSparkline();
+    });
+  });
   var srcBtns = document.querySelectorAll('.source-btn');
   srcBtns.forEach(function(b) {
     b.addEventListener('click', function() {
@@ -5947,6 +5966,16 @@ function outcomeFilterActive() {
   return state.status !== 'any' || state.highlights;
 }
 
+// The range is applied here, at render time, to series that are already computed: the
+// stats, the coverage gate and the cohort/cadence arithmetic all keep the full history.
+// The slice is rebased so its first visible point reads 0%, because a reader who asks
+// for 30D wants what happened in the last 30 days, not where an old book happened to sit.
+function windowSeries(series, fromDate) {
+  var kept = series.filter(function(p) { return p.pct !== null && p.date >= fromDate; });
+  var base = kept.length ? kept[0].pct : 0;
+  return kept.map(function(p) { return Object.assign({}, p, { pct: p.pct - base }); });
+}
+
 function drawSparkline() {
   var svg = $('sparkline');
   var label = $('portfolio-tab-label');
@@ -6005,6 +6034,25 @@ function drawSparkline() {
     if (!plotted.length) plotted = [{ month: '', series: valid }];
   } else {
     plotted = state.portfolioView === 'cohorts' ? cohorts : [{ month: '', series: valid }];
+  }
+  document.querySelectorAll('#chart-range button').forEach(function(b) {
+    b.className = 'portfolio-toggle' + (Number(b.getAttribute('data-range')) === chartRangeDays ? ' active' : '');
+  });
+  // The full-history value stays in the caption so a windowed NOW never hides it.
+  var allTime = valid[valid.length - 1];
+  if (chartRangeDays) {
+    var from = new Date(allTime.date + 'T00:00:00Z');
+    from.setUTCDate(from.getUTCDate() - chartRangeDays);
+    from = from.toISOString().slice(0, 10);
+    valid = windowSeries(valid, from);
+    plotted = plotted.map(function(c) { return { month: c.month, series: windowSeries(c.series, from) }; })
+      .filter(function(c) { return c.series.length > 1; });
+    benchByDate = {};
+    windowSeries(portfolio.bench, from).forEach(function(p) { benchByDate[p.date] = p.pct; });
+    if (valid.length < 2) {
+      cur.innerHTML = '<span style="color:var(--muted)">Not enough data in this range</span>';
+      return;
+    }
   }
   var values = [];
   plotted.forEach(function(cohort) {
@@ -6152,7 +6200,9 @@ function drawSparkline() {
   var headline;
   if (c.n > 0) {
     headline = c.n + ' POSITIONS · NOW <strong class="' + cls + '">' + sign + c.pct.toFixed(2) + '%</strong>'
-      + ' <span style="color:var(--dim);font-size:9px;">· priced through ' + c.date + '</span>';
+      + ' <span style="color:var(--dim);font-size:9px;">'
+      + (chartRangeDays ? '· all-time ' + fmtPct(allTime.pct) + ' ' : '')
+      + '· priced through ' + c.date + '</span>';
   } else if (lastOpen) {
     headline = 'ALL WINDOWS CLOSED · FINAL <strong class="' + cls + '">' + sign + c.pct.toFixed(2) + '%</strong>'
       + ' <span style="color:var(--dim);font-size:9px;">· last position closed ' + lastOpen.date + '</span>';
