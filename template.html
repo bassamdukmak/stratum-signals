@@ -315,6 +315,8 @@ header {
 .errors ul { margin-top:8px; padding-left:20px; }
 .errors li { padding:2px 0; }
 .errors strong { color:var(--white); font-weight:500; }
+.errors.ok { background:transparent; border-color:rgba(255,255,255,0.12); }
+.errors.ok summary { color:var(--muted); }
 
 /* ── Fatal error message ── */
 .fatal-error {
@@ -604,7 +606,7 @@ var SNAPSHOT = __SNAPSHOT_JSON__;
 // Bumped by hand on every edit. Printed at the top of the load log so a browser
 // serving a stale copy of this file can be spotted immediately instead of being
 // mistaken for a fix that did not work.
-var DASHBOARD_BUILD = '2026-09-06.78';
+var DASHBOARD_BUILD = '2026-09-08.79';
 
 var LS_KEYS = 'stratum_signal_viewer_keys_v2';
 
@@ -1373,93 +1375,15 @@ function latestStoredSession(barsBySymbol) {
 }
 
 // ── Price-symbol classification ──
-var NON_EQUITY_PRICE_LABELS = {
-  // Regional/index labels that can appear in signal_outcome but are not normal
-  // equity tickers for the Twelve Data /time_series endpoint. These
-  // should not be counted as broken price-data tickers.
-  KOSPI: 'Korean Composite Stock Price Index / market label',
-  KOSDAQ: 'Korean growth-market index / market label',
-  NIKKEI: 'Japanese equity index / market label',
-  TOPIX: 'Japanese equity index / market label',
-  HSI: 'Hang Seng Index / market label',
-  HANGSENG: 'Hang Seng Index / market label',
-  SHCOMP: 'Shanghai Composite Index / market label',
-  SSE: 'Shanghai exchange/index label',
-  CSI300: 'China CSI 300 Index / market label',
-  TAIEX: 'Taiwan equity index / market label',
-  IBOVESPA: 'Brazil equity index / market label',
-  BOVESPA: 'Brazil equity index / market label',
-  MOEX: 'Moscow Exchange index / market label',
-  DXY: 'US Dollar Index / macro label',
-  VIX: 'Volatility index / macro label',
-  BRENT: 'Brent crude macro/commodity label',
-  WTI: 'WTI crude macro/commodity label',
-  US10Y: 'US 10-year yield macro label',
-  '10Y': '10-year yield macro label'
-};
-
-// Symbols MEASURED (2026-08-10) as unavailable from both the pipeline's free vendors
-// and Twelve Data's free tier. Retrying them every load spends credits that healthy
-// tickers then get rate-limited out of, so they are skipped by name with the real
-// reason rather than reported as a fixable data problem.
-var UNAVAILABLE_PRICE_SYMBOLS = {
-  // Regional index / exchange labels that leak from the regional radar (measured 2026-09-04).
-  // They are not tradeable US symbols; no free vendor will ever answer them.
-  DANGCEM: 'Nigerian listing, no US price vendor', ZENITHBANK: 'Nigerian listing, no US price vendor',
-  HK50: 'index label, not a ticker', JP225: 'index label, not a ticker',
-  KS11: 'index label, not a ticker', NGXASI: 'index label, not a ticker',
-  HXSCL: 'OTC listing no price vendor carries',
-  KIOXF: 'OTC listing no price vendor carries',
-  MUROF: 'OTC listing no price vendor carries',
-  UGAZ: 'delisted leveraged ETN',
-  GG:   'delisted (Goldcorp, acquired 2019); Twelve Data gates it behind a paid plan',
-  ETF:  'not a ticker — a literal "ETF" label leaked from report prose',
-  MRO:  'delisted (Marathon Oil, acquired 2024); Twelve Data gates it behind a paid plan',
-  OIL:  'commodity label, not an equity ticker; Twelve Data gates it behind a paid plan',
-  TCS:  'Twelve Data gates it behind a paid plan and no free vendor carries it',
-  // Added 2026-08-19 from a run that spent 3331 credits against an 800/day limit. Each of
-  // these fails the same way on every load, so they are pure waste: the request is spent,
-  // the answer is always an error, and the credit is gone.
-  NONE: 'not a ticker — a literal "NONE" leaked from report prose, same class as the ETF label',
-  SGH:  'Twelve Data gates it behind the Pro/Venture plan',
-  // Keyed PBRA, not PBR-A: priceLookupConfig looks up normalizedSymbol(), which strips
-  // hyphens. The hyphenated key silently never matched, and the symbol then sat through
-  // the full 6/min rate-limit queue before failing - 172 of one load's 176 seconds.
-  PBRA: 'preferred share class; Twelve Data rejects the symbol and no free vendor carries it',
-  // Foreign ordinaries, ADR-adjacent OTC lines and a mutual fund. Measured 2026-08-19 by
-  // running every free vendor (nasdaq, stockanalysis, Yahoo) against each: all three fail,
-  // and the refresher falls back to serving whatever the archive already holds. The
-  // dashboard was retrying them on EVERY load at 6 requests/minute - three minutes of
-  // waiting to be told again that nobody carries them. Their stored closes are the best
-  // price that exists, so the card grades against those instead of stalling the load.
-  ASII:  'Indonesian ordinary; no free vendor carries it, archive close is the best available',
-  BACHF: 'foreign OTC line; no free vendor carries it, archive close is the best available',
-  CICHY: 'ADR-adjacent OTC line; no free vendor carries it, archive close is the best available',
-  DNZOY: 'ADR-adjacent OTC line; no free vendor carries it, archive close is the best available',
-  DSCSY: 'ADR-adjacent OTC line; no free vendor carries it, archive close is the best available',
-  EURN:  'delisted after the CMB takeover; no free vendor carries it',
-  IDCBY: 'ADR-adjacent OTC line; no free vendor carries it, archive close is the best available',
-  LVMHF: 'foreign ordinary; no free vendor carries it, archive close is the best available',
-  MTSUY: 'ADR-adjacent OTC line; no free vendor carries it, archive close is the best available',
-  SFTBY: 'ADR-adjacent OTC line; no free vendor carries it, archive close is the best available',
-  SIEGY: 'ADR-adjacent OTC line; no free vendor carries it, archive close is the best available',
-  SSNLF: 'Samsung OTC line; no free vendor carries it, archive close is the best available',
-  VEURX: 'Vanguard mutual fund, not an exchange-traded symbol; no vendor serves daily bars',
-  // Measured dead 2026-09-04: none of the free sources (nasdaq, stockanalysis, Yahoo)
-  // carry these. Keys are normalized (hyphens stripped, per normalizedSymbol) so e.g.
-  // the raw ticker "ATS-VI" matches as ATSVI.
-  ATSVI: 'foreign listing; no free vendor carries it',
-  BNPPA: 'Paris-listed ordinary (BNP.PA); no free vendor carries it',
-  CCCL:  'London-listed ordinary (CCC.L); no free vendor carries it',
-  CEQ:   'no free vendor carries it',
-  FCHI:  'CAC 40 index label, not an equity ticker; no free vendor carries it',
-  GLEPA: 'Paris-listed ordinary (GLE.PA); no free vendor carries it',
-  GTCO:  'no free vendor carries it',
-  NSEI:  'NIFTY 50 index label, not an equity ticker; no free vendor carries it',
-  PALAF: 'foreign OTC line; no free vendor carries it',
-  PRUL:  'London-listed ordinary (PRU.L); no free vendor carries it',
-  SOIPA: 'Paris-listed ordinary (SOI.PA); no free vendor carries it',
-  SSEC:  'Shanghai Composite index label, not an equity ticker; no free vendor carries it'
+// One rule, the same one prod's priceStoreRefresh.js applies: anything that does not look
+// like a listed ticker (index labels, prose leaks like "ETF"/"NONE", exchange codes) is a
+// label and is never counted as a price problem. Tickers that pass but that no source
+// serves are marked not_tracked by prod, and resolveBars skips those by that status.
+var TRADABLE_SYMBOL = /^[A-Z]{1,5}([.\-][A-Z]{1,2})?$/;
+// Reasons worth keeping for the card; the skip itself comes from the not_tracked status.
+var DELISTED = {
+  GG:  'delisted (Goldcorp, acquired 2019)',
+  MRO: 'delisted (Marathon Oil, acquired 2024)'
 };
 
 function normalizedSymbol(ticker) {
@@ -1467,23 +1391,13 @@ function normalizedSymbol(ticker) {
 }
 
 function priceLookupConfig(ticker) {
+  var raw = String(ticker || '').trim();
   var sym = normalizedSymbol(ticker);
   if (!sym) return { fetch: false, symbol: sym, reason: 'missing ticker/symbol' };
-  if (NON_EQUITY_PRICE_LABELS[sym]) {
-    return {
-      fetch: false,
-      symbol: sym,
-      reason: NON_EQUITY_PRICE_LABELS[sym] + ' — skipped because it is not a normal equity ticker'
-    };
+  if (!TRADABLE_SYMBOL.test(raw.toUpperCase())) {
+    return { fetch: false, symbol: sym, label: true, reason: 'non-equity label, not a ticker' };
   }
-  if (UNAVAILABLE_PRICE_SYMBOLS[sym]) {
-    return {
-      fetch: false,
-      symbol: sym,
-      reason: UNAVAILABLE_PRICE_SYMBOLS[sym] + ' — no price source carries it'
-    };
-  }
-  return { fetch: true, symbol: String(ticker || '').trim() };
+  return { fetch: true, symbol: raw };
 }
 
 
@@ -4822,7 +4736,7 @@ function computeAuditStats() {
   return [
     {label:'Duplicates removed', value:(state.audit && state.audit.duplicatesRemoved) || 0, note:'Rows collapsed before rendering so repeated database calls do not inflate stats.'},
     {label:'Price-data ticker failures', value:(state.errorReport || []).length, note:'Real data fetch problems, excluding intentional index/label skips like KOSPI.'},
-    {label:'Unsupported non-stock labels', value:(state.audit && state.audit.skippedPriceLabels ? state.audit.skippedPriceLabels.length : 0), note:'Market labels skipped from price fetching instead of counted as broken tickers.'},
+    {label:'Non-equity labels / untrackable skipped', value:(state.audit && state.audit.skippedPriceLabels ? state.audit.skippedPriceLabels.length : 0), note:'Labels failing the ticker rule, plus not_tracked tickers no price source carries. Not counted as broken.'},
     {label:'Benchmark fetch issues', value:benchmarkErrors, note:'If high, relative SPY/QQQ/sector columns may show blanks.'},
     {label:'Missing live price rows', value:missingLive, note:'Rows that cannot be used in return calculations.'},
     {label:'Skipped rows with price data', value:skippedPriced, note:'Not-tracked rows that still have prices; useful for audit but excluded from normal stats.'},
@@ -5031,12 +4945,18 @@ function renderErrorBanner() {
     }
   }
 
-  if (filtered.length === 0) return;
-  var items = filtered.slice(0, 30).map(function(e) {
+  var skipped = ((state.audit && state.audit.skippedPriceLabels) || []).filter(function(e) { return errorAppliesToSource(e, state.source); });
+  var labels = skipped.filter(function(e) { return e.label; }).length;
+  var untrackable = skipped.length - labels;
+  if (filtered.length === 0 && skipped.length === 0) return;
+  var items = filtered.map(function(e) {
     return '<li><strong>' + escapeHtml(e.ticker) + '</strong>: ' + escapeHtml(e.error) + '</li>';
-  }).join('');
+  }).concat(skipped.map(function(e) {
+    return '<li style="opacity:.6"><strong>' + escapeHtml(e.ticker) + '</strong>: ' + escapeHtml(e.reason) + '</li>';
+  })).slice(0, 60).join('');
   var suffix = state.source === 'all' ? '' : ' in this view';
-  mount.innerHTML = '<details class="errors"><summary>Price-data issues' + suffix + ': ' + filtered.length + ' ticker(s) had data problems</summary><ul>' + items + '</ul></details>';
+  var counts = filtered.length + ' ticker(s) had data problems · ' + labels + ' non-equity labels skipped · ' + untrackable + ' untrackable skipped';
+  mount.innerHTML += '<details class="' + (filtered.length ? 'errors' : 'errors ok') + '"><summary>Price-data issues' + suffix + ': ' + counts + '</summary><ul>' + items + '</ul></details>';
 }
 
 // ── Stats + filters + cards + errors render ──
@@ -6399,13 +6319,19 @@ async function loadAll(keys) {
           + staleStored.slice(0, 20).join(', ') + (staleStored.length > 20 ? ', …' : ''));
     }
 
-    function resolveBars(symbol, fromDate) {
+    function resolveBars(symbol, fromDate, rows) {
       var cfg = priceLookupConfig(symbol);
       if (!cfg.fetch) {
-        return { bars: [], error: null, skipped: true, skipReason: cfg.reason, lookupSymbol: cfg.symbol };
+        return { bars: [], error: null, skipped: true, label: cfg.label, skipReason: cfg.reason, lookupSymbol: cfg.symbol };
       }
       var series = storedBars[symbol];
       if (!series || !series.length) {
+        // Prod marks rows no price source can serve as not_tracked. Only a ticker that is
+        // still tracking with nothing in the store means the refresher genuinely failed.
+        if (rows.every(rowIsSkipped)) {
+          var why = DELISTED[normalizedSymbol(symbol)] || 'no price source carries it';
+          return { bars: [], error: null, skipped: true, skipReason: why + ' — untrackable, skipped', lookupSymbol: cfg.symbol };
+        }
         return { bars: [], error: 'not in the price store — run refreshStorePrices.js', fromStore: true };
       }
       return {
@@ -6430,12 +6356,12 @@ async function loadAll(keys) {
       var tickerSources = Object.keys(sourceMap);
       var earliest = tRows.reduce(function(min, r) { return r.report_date < min ? r.report_date : min; }, tRows[0].report_date);
       var fromDate = addDays(earliest, -7);
-      var result = resolveBars(tk, fromDate);
+      var result = resolveBars(tk, fromDate, tRows);
       barsByTicker[tk] = result.bars;
       priceResults[tk] = result;
       if (result.skipped) {
         log('  ' + pad(tk, 8) + ' ↷ skipped — ' + result.skipReason);
-        skippedPriceLabels.push({ ticker: tk, reason: result.skipReason, sources: tickerSources });
+        skippedPriceLabels.push({ ticker: tk, reason: result.skipReason, label: !!result.label, sources: tickerSources });
       } else if (result.error) {
         log('  ' + pad(tk, 8) + ' ✗ ' + result.error);
         errorReport.push({ ticker: tk, error: result.error, sources: tickerSources });
