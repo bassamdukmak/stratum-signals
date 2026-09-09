@@ -606,7 +606,7 @@ var SNAPSHOT = __SNAPSHOT_JSON__;
 // Bumped by hand on every edit. Printed at the top of the load log so a browser
 // serving a stale copy of this file can be spotted immediately instead of being
 // mistaken for a fix that did not work.
-var DASHBOARD_BUILD = '2026-09-08.79';
+var DASHBOARD_BUILD = '2026-09-08.80';
 
 var LS_KEYS = 'stratum_signal_viewer_keys_v2';
 
@@ -621,7 +621,9 @@ try { chartRangeDays = Number(localStorage.getItem(LS_CHART_RANGE)) || 0; } catc
 
 var state = {
   source: 'all', status: 'any', horizon: 'any', window: 'any', engine: 'any',
-  latestOnly: false, oldestOnly: true, highlights: false,
+  // Default to latest-only: oldest-only pinned each ticker to its FIRST-EVER call, so a
+  // week of new calls (DELL +23% among them, measured 2026-09-08) never entered the curve.
+  latestOnly: true, oldestOnly: false, highlights: false,
   congressSalesAsShorts: false, congressWindowDays: 90, congressTrades: null,   // window default mirrors CONGRESS_DEFAULT_WINDOW_DAYS
   highlightsThreshold: 0.0, sort: 'perf_desc', analyticsOpen: false, quantMode: true, portfolioView: 'blended',
   lastLoadedDate: null,
