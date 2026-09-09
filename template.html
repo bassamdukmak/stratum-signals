@@ -606,7 +606,7 @@ var SNAPSHOT = __SNAPSHOT_JSON__;
 // Bumped by hand on every edit. Printed at the top of the load log so a browser
 // serving a stale copy of this file can be spotted immediately instead of being
 // mistaken for a fix that did not work.
-var DASHBOARD_BUILD = '2026-09-08.81';
+var DASHBOARD_BUILD = '2026-09-09.82';
 
 var LS_KEYS = 'stratum_signal_viewer_keys_v2';
 
@@ -1357,10 +1357,19 @@ function sessionsBefore(barsBySymbol, session, count) {
 // Compared against instead of the store's own dates, because a book that is uniformly
 // one session behind has a median (and a max, if the daily touched nobody) equal to
 // the stale date - measured 2026-09-04, 357 symbols at 09-02 read as current.
-// Weekends only; the morning after a market holiday over-reports by one session.
-function expectedLatestSession() {
-  var d = new Date(isoToday() + 'T12:00:00Z');
-  do { d.setUTCDate(d.getUTCDate() - 1); } while (d.getUTCDay() === 0 || d.getUTCDay() === 6);
+// NYSE full-day closures, observed dates. The weekends-only version was a ponytail
+// ceiling accepted on 2026-09-04; it became a false stale-store alarm on Labor Day
+// 2026-09-07 ("expected 2026-09-07"). Extend by hand each December; no library.
+var NYSE_HOLIDAYS = [
+  '2026-01-01', '2026-01-19', '2026-02-16', '2026-04-03', '2026-05-25',
+  '2026-06-19', '2026-07-03', '2026-09-07', '2026-11-26', '2026-12-25',
+  '2027-01-01', '2027-01-18', '2027-02-15', '2027-03-26', '2027-05-31',
+  '2027-06-18', '2027-07-05', '2027-09-06', '2027-11-25', '2027-12-24'
+];
+function expectedLatestSession(todayEt) {
+  var d = new Date((todayEt || isoToday()) + 'T12:00:00Z');
+  do { d.setUTCDate(d.getUTCDate() - 1); }
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6 || NYSE_HOLIDAYS.indexOf(d.toISOString().slice(0, 10)) !== -1);
   return d.toISOString().slice(0, 10);
 }
 
@@ -2528,13 +2537,13 @@ function dedupeSignalRows(rows) {
 // and that row is filtered out while no DeepSeek AAPL row was ever marked oldest, so the
 // ticker disappears from a view that should contain it.
 function editionEligible(r) {
-  return rowMatchesEngine(r) && rowMatchesHorizon(r) && rowMatchesWindow(r);
+  return rowMatchesEngine(r) && rowMatchesHorizon(r) && rowMatchesWindow(r) && rowInChartRange(r);
 }
 // Markers are row properties read by four call sites, so they are recomputed whenever the
 // structural filters change rather than once at load.
 var lastEditionKey = null;
 function refreshEditionMarkers() {
-  var key = state.engine + '|' + state.horizon + '|' + state.window;
+  var key = state.engine + '|' + state.horizon + '|' + state.window + '|' + chartRangeDays;
   if (key === lastEditionKey) return;
   lastEditionKey = key;
   markLatest(state.rows);
@@ -2695,7 +2704,13 @@ function computePortfolioSeries(rows, barsByTicker) {
       coverage[bar.date] = (coverage[bar.date] || 0) + 1;
     });
   });
-  var allSessions = Object.keys(coverage).sort();
+  // Sessions before the selection's first entry hold nothing and would only draw a flat
+  // lead-in from the benchmark's history, so the axis starts where the book does.
+  var firstEntry = rows.reduce(function(min, r) {
+    var d = (r.live && r.live.entry_date) || r.report_date || '';
+    return d && (!min || d < min) ? d : min;
+  }, '');
+  var allSessions = Object.keys(coverage).filter(function(d) { return d >= firstEntry; }).sort();
   if (allSessions.length < 2) return empty;
   var counts = allSessions.map(function(d) { return coverage[d]; }).sort(function(a, b) { return a - b; });
   // Nearest-rank percentile: ceil(N*p)-1. Math.floor(N*p) overshoots by one whenever N is
@@ -3208,6 +3223,20 @@ function rowMatchesWindow(r) {
   return state.window === 'any' || rowWindowState(r) === state.window;
 }
 
+// The 30D/90D control is a structural filter like horizon and window: N keeps the calls
+// made in the last N days before the newest priced session, so the stat sheet, the cards
+// and the curve all describe the same book. It used to slice and rebase the finished
+// series at render time only, and the owner asked why the stats never moved with the
+// range (2026-09-08). An empty floor (ALL) admits every row.
+function chartRangeFloor() {
+  if (!chartRangeDays) return '';
+  var anchor = (state.priceFreshness && state.priceFreshness.storeLatestSession) || isoToday();
+  return addDays(anchor, -chartRangeDays);
+}
+function rowInChartRange(r) {
+  return String(r.report_date || '').slice(0, 10) >= chartRangeFloor();
+}
+
 function analyticsRowsForSource(src) {
   return state.rows.filter(function(r) {
     if (!rowInSource(r, src)) return false;
@@ -3217,6 +3246,7 @@ function analyticsRowsForSource(src) {
     // than the cards on screen.
     if (!rowMatchesHorizon(r)) return false;
     if (!rowMatchesWindow(r)) return false;
+    if (!rowInChartRange(r)) return false;
     if (!rowMatchesEngine(r)) return false;
     if (state.latestOnly && !rowLatestForSource(r, src)) return false;
     if (state.oldestOnly && !rowOldestForSource(r, src)) return false;
@@ -3325,6 +3355,7 @@ function activeFiltersCaption() {
   else if (state.oldestOnly) parts.push('Oldest only');
   else parts.push('All editions');
   if (state.highlights) parts.push('Highlights');
+  if (chartRangeDays) parts.push('Last ' + chartRangeDays + 'd');
   parts.push(state.quantMode ? 'Quant only' : 'Hybrid');
   return parts.join(' · ');
 }
@@ -3613,7 +3644,7 @@ function dailyStanceIsShort(ticker, startDate) {
 
 // Every pick of the selected cadence, flattened into the two books the chart compares.
 function cadenceCurveBooks() {
-  var scored = cadenceState.scored || [];
+  var scored = (cadenceState.scored || []).filter(function(s) { return s.period.startDate >= chartRangeFloor(); });
   var kept = [], cut = [];
   scored.forEach(function(s) {
     s.kept.forEach(function(r) {
@@ -5528,7 +5559,9 @@ function wireFilterEvents() {
     b.addEventListener('click', function() {
       chartRangeDays = Number(b.getAttribute('data-range'));
       try { localStorage.setItem(LS_CHART_RANGE, String(chartRangeDays)); } catch (e) {}
-      drawSparkline();
+      // Structural filter: editions and card tags must be rebuilt, as for horizon/window.
+      refreshEditionMarkers();
+      renderDashboard();
     });
   });
   var srcBtns = document.querySelectorAll('.source-btn');
@@ -5657,6 +5690,7 @@ function applyFilters() {
       var windowTag = state.window === 'open' ? 'tracking' : state.window;
       if (tags.indexOf(windowTag) === -1) ok = false;
     }
+    if (ok && (c.getAttribute('data-sort-date') || '') < chartRangeFloor()) ok = false;
     if (ok && state.latestOnly) {
       var latestTag = 'latest-' + (state.source === 'all' ? 'all' : state.source);
       if (tags.indexOf(latestTag) === -1) ok = false;
@@ -5701,6 +5735,7 @@ function applyFilters() {
 
     if (!rowMatchesHorizon(r)) return false;
     if (!rowMatchesWindow(r)) return false;
+    if (!rowInChartRange(r)) return false;
     if (!rowMatchesEngine(r)) return false;
 
     if (state.latestOnly && !rowLatestForSource(r, state.source)) return false;
@@ -5786,6 +5821,7 @@ function getFilteredRows() {
 
     if (!rowMatchesHorizon(r)) return false;
     if (!rowMatchesWindow(r)) return false;
+    if (!rowInChartRange(r)) return false;
     if (!rowMatchesEngine(r)) return false;
 
     if (state.latestOnly && !rowLatestForSource(r, state.source)) return false;
@@ -5910,6 +5946,7 @@ function rowsForPerformanceCurve() {
     if (rowIsSkipped(r)) return false;
     if (!rowMatchesHorizon(r)) return false;
     if (!rowMatchesWindow(r)) return false;
+    if (!rowInChartRange(r)) return false;
     if (!rowMatchesEngine(r)) return false;
     if (state.latestOnly && !rowLatestForSource(r, state.source)) return false;
     if (state.oldestOnly && !rowOldestForSource(r, state.source)) return false;
@@ -5921,16 +5958,6 @@ function rowsForPerformanceCurve() {
 // can say the line and the cards below it describe different sets.
 function outcomeFilterActive() {
   return state.status !== 'any' || state.highlights;
-}
-
-// The range is applied here, at render time, to series that are already computed: the
-// stats, the coverage gate and the cohort/cadence arithmetic all keep the full history.
-// The slice is rebased so its first visible point reads 0%, because a reader who asks
-// for 30D wants what happened in the last 30 days, not where an old book happened to sit.
-function windowSeries(series, fromDate) {
-  var kept = series.filter(function(p) { return p.pct !== null && p.date >= fromDate; });
-  var base = kept.length ? kept[0].pct : 0;
-  return kept.map(function(p) { return Object.assign({}, p, { pct: p.pct - base }); });
 }
 
 function drawSparkline() {
@@ -5995,22 +6022,6 @@ function drawSparkline() {
   document.querySelectorAll('#chart-range button').forEach(function(b) {
     b.className = 'portfolio-toggle' + (Number(b.getAttribute('data-range')) === chartRangeDays ? ' active' : '');
   });
-  // The full-history value stays in the caption so a windowed NOW never hides it.
-  var allTime = valid[valid.length - 1];
-  if (chartRangeDays) {
-    var from = new Date(allTime.date + 'T00:00:00Z');
-    from.setUTCDate(from.getUTCDate() - chartRangeDays);
-    from = from.toISOString().slice(0, 10);
-    valid = windowSeries(valid, from);
-    plotted = plotted.map(function(c) { return { month: c.month, series: windowSeries(c.series, from) }; })
-      .filter(function(c) { return c.series.length > 1; });
-    benchByDate = {};
-    windowSeries(portfolio.bench, from).forEach(function(p) { benchByDate[p.date] = p.pct; });
-    if (valid.length < 2) {
-      cur.innerHTML = '<span style="color:var(--muted)">Not enough data in this range</span>';
-      return;
-    }
-  }
   var values = [];
   plotted.forEach(function(cohort) {
     cohort.series.forEach(function(p) { if (p.pct !== null) values.push(p.pct); });
@@ -6158,8 +6169,8 @@ function drawSparkline() {
   if (c.n > 0) {
     headline = c.n + ' POSITIONS · NOW <strong class="' + cls + '">' + sign + c.pct.toFixed(2) + '%</strong>'
       + ' <span style="color:var(--dim);font-size:9px;">'
-      + (chartRangeDays ? '· all-time ' + fmtPct(allTime.pct) + ' ' : '')
-      + '· priced through ' + c.date + '</span>';
+      + '· priced through ' + c.date
+      + (chartRangeDays ? ' · last ' + chartRangeDays + 'd' : '') + '</span>';
   } else if (lastOpen) {
     headline = 'ALL WINDOWS CLOSED · FINAL <strong class="' + cls + '">' + sign + c.pct.toFixed(2) + '%</strong>'
       + ' <span style="color:var(--dim);font-size:9px;">· last position closed ' + lastOpen.date + '</span>';
