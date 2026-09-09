@@ -606,7 +606,7 @@ var SNAPSHOT = __SNAPSHOT_JSON__;
 // Bumped by hand on every edit. Printed at the top of the load log so a browser
 // serving a stale copy of this file can be spotted immediately instead of being
 // mistaken for a fix that did not work.
-var DASHBOARD_BUILD = '2026-09-09.83';
+var DASHBOARD_BUILD = '2026-09-09.84';
 
 var LS_KEYS = 'stratum_signal_viewer_keys_v2';
 
@@ -2573,6 +2573,18 @@ function refreshEditionMarkers() {
   lastEditionKey = key;
   markLatest(state.rows);
   markOldest(state.rows);
+  refreshEarlierMarks();
+}
+
+// The 'earlier call' mark is the only card content that depends on the markers.
+function refreshEarlierMarks() {
+  state.rows.forEach(function(r, i) {
+    var card = rowCards[i];
+    if (!card) return;
+    var mark = card.querySelector('.earlier-mark');
+    if (rowLatestSomewhere(r)) { if (mark) mark.remove(); }
+    else if (!mark) card.querySelector('.card-date').insertAdjacentHTML('beforeend', EARLIER_MARK_HTML);
+  });
 }
 
 function markLatest(rows) {
@@ -2914,14 +2926,12 @@ function computePortfolioCohorts(rows, barsByTicker) {
 }
 
 // ── Card rendering (returns HTML string) ──
-function renderCardHtml(row) {
-  // Declared here so the badge below can read it without threading another argument
-  // through the template.
-  var staleSince = row.live && row.live.price_stale_since;
+// Filter tags derive from the row, not from a data- attribute on the card: the edition
+// markers change with every structural filter, and reading them here means a horizon
+// click re-filters the existing cards instead of rebuilding all of them.
+function cardTags(row) {
   var live = row.live || { ok: false };
-  var direction = row.direction || 'unknown';
   var stance = live.stance || 'ungraded';
-
   var tags = [];
   if (row.signal_section === 'top5') {
     tags.push('top5');
@@ -2960,6 +2970,21 @@ function renderCardHtml(row) {
   if (row._isOldestRadar) tags.push('oldest-radar');
   if (row._isLatestAll) tags.push('latest'); else tags.push('earlier');
   if (!live.ok) tags.push('nodata');
+  return tags;
+}
+function rowLatestSomewhere(row) {
+  return !!(row._isLatestAll || row._isLatestTop5 || row._isLatestFa || row._isLatestRadar || row._isLatestCongress);
+}
+var EARLIER_MARK_HTML = '<span class="earlier-mark">earlier call</span>';
+
+function renderCardHtml(row) {
+  // Declared here so the badge below can read it without threading another argument
+  // through the template.
+  var staleSince = row.live && row.live.price_stale_since;
+  var live = row.live || { ok: false };
+  var direction = row.direction || 'unknown';
+  var stance = live.stance || 'ungraded';
+
 
   var primaryBadge = '';
   // ── Primary badge logic ──
@@ -3080,8 +3105,7 @@ function renderCardHtml(row) {
 
   var pctElapsed = live.days_window > 0 ? Math.min(100, Math.round(100 * (live.days_held || 0) / live.days_window)) : 0;
   var horizonText = row.horizon_text ? '· ' + escapeHtml(row.horizon_text) : '';
-  var isLatestSomewhere = row._isLatestAll || row._isLatestTop5 || row._isLatestFa || row._isLatestRadar || row._isLatestCongress;
-  var earlierMark = isLatestSomewhere ? '' : '<span class="earlier-mark">earlier call</span>';
+  var earlierMark = rowLatestSomewhere(row) ? '' : EARLIER_MARK_HTML;
 
   // Sort keys: stance-adjusted return (so winning calls rank high regardless
   // of long/short), report date, conviction, days remaining. Ungraded rows
@@ -3097,7 +3121,7 @@ function renderCardHtml(row) {
   // literally "the price went up." Sentinel -9999 for rows with no live data.
   var rawReturn = (live.current_return_pct !== null && live.current_return_pct !== undefined) ? live.current_return_pct : -9999;
 
-  return '<div class="card" data-tags="' + tags.join(' ') + '"'
+  return '<div class="card"'
     + ' data-sort-perf="' + sortPerf + '"'
     + ' data-sort-date="' + escapeHtml(sortDate) + '"'
     + ' data-sort-conv="' + sortConv + '"'
@@ -5228,10 +5252,6 @@ function renderDashboard() {
     }).join('');
   }
 
-  // Initial stats render uses all rows. applyFilters() will re-call renderStats
-  // with the active subset whenever filters change.
-  renderStats(rows);
-
   // Filters
   $('filters').innerHTML =
     '<div class="filter-group">'
@@ -5302,12 +5322,9 @@ function renderDashboard() {
 
   wireFilterEvents();
 
-  // Errors + analytics
-  renderErrorBanner();
-  renderAnalyticsPanel();
-
-  // Cards
+  // Cards. The stats, error banner and diagnostics sheet are rendered by applyFilters below.
   $('grid').innerHTML = rows.length ? rows.map(renderCardHtml).join('') : '<div class="empty-state">No signals found.</div>';
+  linkRowCards();
   $('visible-count').textContent = rows.length;
   $('total-count').textContent = rows.length;
 
@@ -5333,6 +5350,7 @@ function rerenderForScoreMode() {
     applyBenchmarkDiagnostics(state.rows, state.barsByTicker || {});
   }
   $('grid').innerHTML = (state.rows && state.rows.length) ? state.rows.map(renderCardHtml).join('') : '<div class="empty-state">No signals found.</div>';
+  linkRowCards();
   applyFilters();
 }
 
@@ -5594,9 +5612,9 @@ function wireFilterEvents() {
     b.addEventListener('click', function() {
       chartRangeDays = Number(b.getAttribute('data-range'));
       try { localStorage.setItem(LS_CHART_RANGE, String(chartRangeDays)); } catch (e) {}
-      // Structural filter: editions and card tags must be rebuilt, as for horizon/window.
+      // Structural filter: editions must be re-marked, as for horizon/window.
       refreshEditionMarkers();
-      renderDashboard();
+      applyFilters();
     });
   });
   var srcBtns = document.querySelectorAll('.source-btn');
@@ -5627,10 +5645,10 @@ function wireFilterEvents() {
         btns.forEach(function(x) { x.classList.remove('active'); });
         b.classList.add('active');
         state[group] = b.getAttribute('data-' + group);
-        // Not applyFilters(): these three filters change which rows are eligible to be an
-        // edition, so the markers and the card tags that carry them must be rebuilt.
+        // These three filters change which rows are eligible to be an edition, so the
+        // markers are re-derived first; the cards themselves are reused.
         refreshEditionMarkers();
-        renderDashboard();
+        applyFilters();
       });
     });
   });
@@ -5699,13 +5717,21 @@ function wireFilterEvents() {
   }
 }
 
+// rowCards[i] is the card element rendered for state.rows[i]; rebuilt with the grid.
+var rowCards = [];
+function linkRowCards() {
+  rowCards = Array.prototype.slice.call($('grid').querySelectorAll('.card'));
+}
+
 function applyFilters() {
   var grid = $('grid');
-  var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
+  var cards = rowCards.slice();
   var thresh = state.highlightsThreshold;
   var visible = 0;
-  cards.forEach(function(c) {
-    var tags = (c.getAttribute('data-tags') || '').split(' ');
+  state.rows.forEach(function(r, i) {
+    var c = cards[i];
+    if (!c) return;
+    var tags = cardTags(r);
     var ok = true;
     // Congress is its own book and is never part of All. 'all' previously did NO source
     // test, so with Oldest Only off (its tags are the only thing that had been hiding
@@ -5832,8 +5858,10 @@ function applyFilters() {
         return 0;
     }
   });
-  // Re-append in sorted order. Appending an existing element moves it.
-  cards.forEach(function(c) { grid.appendChild(c); });
+  // Re-append in sorted order (appending an existing element moves it), but only when
+  // the order actually changed: moving 1781 cards costs a full layout.
+  var reordered = cards.some(function(c, i) { return grid.children[i] !== c; });
+  if (reordered) cards.forEach(function(c) { grid.appendChild(c); });
 
   $('visible-count').textContent = visible;
   drawSparkline();
