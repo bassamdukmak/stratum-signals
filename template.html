@@ -1784,15 +1784,19 @@ function quantStanceFromVerdict(v) {
 function computeGradeStance(row) {
   // Quant-only mode: any row that has a quant_score is graded purely off that
   // score (hybrid_score and the LLM effective_verdict are ignored for FA rows).
+  // v2 fills in only when it yields a stance. A flat v2 (the quant-only WAIT band, or a
+  // WAIT / HOLD / TRIM verdict) on a row v1 never scored falls through to the report's
+  // direction, exactly as it did before v2 was read here; a flat v1 stays ungraded.
   if (state.quantMode && rowQuant(row) !== null && rowQuant(row) !== undefined) {
-    return quantStanceFromVerdict(quantVerdict(rowQuant(row)));
+    var qs = quantStanceFromVerdict(quantVerdict(rowQuant(row)));
+    if (qs !== 'ungraded' || (row.quant_score !== null && row.quant_score !== undefined)) return qs;
   }
   var v = rowVerdict(row);
   if (v) {
     var u = String(v).trim().toUpperCase();
     if (u === 'BUY' || u === 'STRONG BUY' || u === 'BUILD SLOWLY') return 'long';
     if (u === 'AVOID' || u === 'SELL') return 'short';
-    if (u === 'WAIT' || u === 'HOLD' || u === 'TRIM') return 'ungraded';
+    if ((u === 'WAIT' || u === 'HOLD' || u === 'TRIM') && row.effective_verdict) return 'ungraded';
   }
   var d = row.direction ? String(row.direction).trim().toLowerCase() : '';
   if (d === 'bullish' || d === 'bull' || d === 'long') return 'long';
