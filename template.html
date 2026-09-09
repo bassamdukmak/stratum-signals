@@ -606,7 +606,7 @@ var SNAPSHOT = __SNAPSHOT_JSON__;
 // Bumped by hand on every edit. Printed at the top of the load log so a browser
 // serving a stale copy of this file can be spotted immediately instead of being
 // mistaken for a fix that did not work.
-var DASHBOARD_BUILD = '2026-09-08.80';
+var DASHBOARD_BUILD = '2026-09-08.81';
 
 var LS_KEYS = 'stratum_signal_viewer_keys_v2';
 
@@ -1139,7 +1139,7 @@ var SIGNAL_COLUMNS = [
   // v2_hybrid columns while the lean select never fetched them, so both were blank on every
   // row of every export - a column that promises a value and always delivers nothing is
   // worse than an absent one, because a reader takes the blank for "no score exists".
-  'v2_quant_score', 'v2_hybrid_score',
+  'v2_quant_score', 'v2_hybrid_score', 'v2_effective_verdict',
   // prices the live return math reads
   'price_at_call', 'current_price', 'peak_price', 'peak_date', 'trough_price', 'trough_date',
   'spy_return_pct'
@@ -1154,7 +1154,7 @@ var SIGNAL_COLUMNS = [
 // so without this bump today's cache would keep serving rows missing them and both export
 // columns would stay blank until the cache expired overnight. Third cache fossil this
 // session - a column change must always move the key.
-var LS_SIGNAL_CACHE = 'stratum_signal_viewer_signal_cache_v2';
+var LS_SIGNAL_CACHE = 'stratum_signal_viewer_signal_cache_v3';
 
 // Keyed on date alone until 2026-09-04, same fossil the bars cache already hit once
 // (see LS_BARS_CACHE above): a same-day write to signal_outcome was invisible to a
@@ -1762,6 +1762,13 @@ async function fetchMarketSnapshot(keys) {
 //                  quant_score <  QUANT_SHORT_MAX => SHORT (short); between => WAIT.
 var QUANT_BUY_MIN = 6.5;
 var QUANT_SHORT_MAX = 5.0;
+// A row's score and verdict for stance/grading. v1 (quant_score / effective_verdict) is
+// null for pill tickers the FA never validated, while the v2 shadow scorer already scored
+// them (measured 2026-09-08: 11 null/null top5 rows since 08-31, 2 with no v1 source at
+// all). Every read goes through these; writes (PIT backfill) still target the v1 columns.
+function rowQuant(r) { return r.quant_score !== null && r.quant_score !== undefined ? r.quant_score : r.v2_quant_score; }
+function rowHybrid(r) { return r.hybrid_score !== null && r.hybrid_score !== undefined ? r.hybrid_score : r.v2_hybrid_score; }
+function rowVerdict(r) { return r.effective_verdict || r.v2_effective_verdict || null; }
 function quantVerdict(score) {
   var n = parseFloat(score);
   if (!isFinite(n)) return null;
@@ -1777,15 +1784,15 @@ function quantStanceFromVerdict(v) {
 function computeGradeStance(row) {
   // Quant-only mode: any row that has a quant_score is graded purely off that
   // score (hybrid_score and the LLM effective_verdict are ignored for FA rows).
-  if (state.quantMode && row.quant_score !== null && row.quant_score !== undefined) {
-    return quantStanceFromVerdict(quantVerdict(row.quant_score));
+  if (state.quantMode && rowQuant(row) !== null && rowQuant(row) !== undefined) {
+    return quantStanceFromVerdict(quantVerdict(rowQuant(row)));
   }
-  var v = row.effective_verdict;
+  var v = rowVerdict(row);
   if (v) {
     var u = String(v).trim().toUpperCase();
     if (u === 'BUY' || u === 'STRONG BUY' || u === 'BUILD SLOWLY') return 'long';
     if (u === 'AVOID' || u === 'SELL') return 'short';
-    if (u === 'WAIT') return 'ungraded';
+    if (u === 'WAIT' || u === 'HOLD' || u === 'TRIM') return 'ungraded';
   }
   var d = row.direction ? String(row.direction).trim().toLowerCase() : '';
   if (d === 'bullish' || d === 'bull' || d === 'long') return 'long';
@@ -1794,7 +1801,7 @@ function computeGradeStance(row) {
 }
 
 function isFaRow(r) {
-  return r && r.signal_section === 'top5' && r.quant_score !== null && r.quant_score !== undefined;
+  return r && r.signal_section === 'top5' && rowQuant(r) !== null && rowQuant(r) !== undefined;
 }
 function isCongressRow(r) { return !!r && r.signal_section === 'congress'; }
 function sourceScope(r) {
@@ -2478,7 +2485,7 @@ function dedupeSignalRows(rows) {
   function clean(v) { return (v === null || v === undefined) ? '' : String(v).trim().toUpperCase(); }
   function canonicalKey(r) {
     return [
-      clean(r.ticker), sourceScope(r), clean(r.report_date), clean(r.effective_verdict || r.direction),
+      clean(r.ticker), sourceScope(r), clean(r.report_date), clean(rowVerdict(r) || r.direction),
       clean(r.holding_type), clean(r.window_days), clean(r.signal_type), clean(r.region), clean(r.event_name)
     ].join('|');
   }
@@ -2486,13 +2493,13 @@ function dedupeSignalRows(rows) {
     // Return the row that should survive if two rows represent the same call.
     var scoreA = statusRank(a) * 1000000 + sourceRank(a) * 100000
       + (a.price_at_call !== null && a.price_at_call !== undefined ? 10000 : 0)
-      + (a.quant_score !== null && a.quant_score !== undefined ? 1000 : 0)
-      + (a.hybrid_score !== null && a.hybrid_score !== undefined ? 500 : 0)
+      + (rowQuant(a) !== null && rowQuant(a) !== undefined ? 1000 : 0)
+      + (rowHybrid(a) !== null && rowHybrid(a) !== undefined ? 500 : 0)
       + numOrSentinel(a.conviction_pct, -1);
     var scoreB = statusRank(b) * 1000000 + sourceRank(b) * 100000
       + (b.price_at_call !== null && b.price_at_call !== undefined ? 10000 : 0)
-      + (b.quant_score !== null && b.quant_score !== undefined ? 1000 : 0)
-      + (b.hybrid_score !== null && b.hybrid_score !== undefined ? 500 : 0)
+      + (rowQuant(b) !== null && rowQuant(b) !== undefined ? 1000 : 0)
+      + (rowHybrid(b) !== null && rowHybrid(b) !== undefined ? 500 : 0)
       + numOrSentinel(b.conviction_pct, -1);
     if (scoreA !== scoreB) return scoreA > scoreB ? a : b;
     var ta = a.updated_at || a.created_at || '';
@@ -2875,7 +2882,7 @@ function renderCardHtml(row) {
   var tags = [];
   if (row.signal_section === 'top5') {
     tags.push('top5');
-    if (row.quant_score !== null && row.quant_score !== undefined) tags.push('fa');
+    if (rowQuant(row) !== null && rowQuant(row) !== undefined) tags.push('fa');
   } else if (row.signal_section === 'regional_radar') tags.push('radar');
   else if (isCongressRow(row)) tags.push('congress');
 
@@ -2922,7 +2929,7 @@ function renderCardHtml(row) {
   var dirLower = String(direction || '').trim().toLowerCase();
   if (row.signal_section === 'regional_radar' && row.region) {
     primaryBadge = '<span class="badge badge-region">' + escapeHtml(row.region) + '</span>';
-  } else if (row.effective_verdict || (state.quantMode && row.quant_score !== null && row.quant_score !== undefined)) {
+  } else if (rowVerdict(row) || (state.quantMode && rowQuant(row) !== null && rowQuant(row) !== undefined)) {
     primaryBadge = ''; // verdict (or quant verdict) supersedes direction
   } else if (dirLower === 'bullish' || dirLower === 'bull' || dirLower === 'long') {
     primaryBadge = '<span class="badge badge-bull">▲ BULL</span>';
@@ -2933,13 +2940,13 @@ function renderCardHtml(row) {
   }
 
   var verdictBadge = '';
-  var _qv = (state.quantMode && row.quant_score !== null && row.quant_score !== undefined) ? quantVerdict(row.quant_score) : null;
+  var _qv = (state.quantMode && rowQuant(row) !== null && rowQuant(row) !== undefined) ? quantVerdict(rowQuant(row)) : null;
   if (_qv) {
     // Quant-only verdict (BUY / SHORT / WAIT) derived purely from quant_score.
     var qcls = _qv === 'BUY' ? 'badge-buy' : (_qv === 'SHORT' ? 'badge-avoid' : 'badge-wait');
     verdictBadge = '<span class="badge ' + qcls + '">' + _qv + '</span>';
-  } else if (row.effective_verdict) {
-    var v = String(row.effective_verdict).toUpperCase();
+  } else if (rowVerdict(row)) {
+    var v = String(rowVerdict(row)).toUpperCase();
     var cls = 'badge-wait';
     if (v === 'BUY' || v === 'STRONG BUY') cls = 'badge-buy';
     else if (v === 'BUILD SLOWLY') cls = 'badge-build';
@@ -2955,8 +2962,8 @@ function renderCardHtml(row) {
   // the card showed only "SHORT" — so a reader comparing the card to the email they
   // actually received saw a contradiction with no explanation. The card now carries
   // both, and grading still follows the quant verdict shown in the badge.
-  var reportedCall = row.effective_verdict
-    ? String(row.effective_verdict).toUpperCase()
+  var reportedCall = rowVerdict(row)
+    ? String(rowVerdict(row)).toUpperCase()
     : (dirLower === 'bullish' || dirLower === 'bull' || dirLower === 'long' ? 'BULLISH'
       : (dirLower === 'bearish' || dirLower === 'bear' || dirLower === 'short' ? 'BEARISH' : ''));
   var quantOverridesReport = !!_qv && !!reportedCall
@@ -2965,7 +2972,7 @@ function renderCardHtml(row) {
     && !(_qv === 'WAIT'  && reportedCall === 'WAIT');
   if (quantOverridesReport) {
     verdictBadge += '<span class="badge badge-ungraded" title="Quant-only mode grades this row from quant_score ('
-      + escapeHtml(String(row.quant_score)) + '), which disagrees with the call published in the report. Turn off Quant Only to grade on the published verdict instead.">report said '
+      + escapeHtml(String(rowQuant(row))) + '), which disagrees with the call published in the report. Turn off Quant Only to grade on the published verdict instead.">report said '
       + escapeHtml(reportedCall) + '</span>';
   }
 
@@ -3009,8 +3016,8 @@ function renderCardHtml(row) {
 
   var metaParts = [];
   if (row.conviction_pct !== null && row.conviction_pct !== undefined) metaParts.push('<span>CONV <strong>' + row.conviction_pct + '%</strong></span>');
-  if (row.quant_score !== null && row.quant_score !== undefined) metaParts.push('<span>QUANT <strong>' + parseFloat(row.quant_score).toFixed(1) + '</strong></span>');
-  if (!state.quantMode && row.hybrid_score !== null && row.hybrid_score !== undefined) metaParts.push('<span>HYBRID <strong>' + parseFloat(row.hybrid_score).toFixed(1) + '</strong></span>');
+  if (rowQuant(row) !== null && rowQuant(row) !== undefined) metaParts.push('<span>QUANT <strong>' + parseFloat(rowQuant(row)).toFixed(1) + '</strong></span>');
+  if (!state.quantMode && rowHybrid(row) !== null && rowHybrid(row) !== undefined) metaParts.push('<span>HYBRID <strong>' + parseFloat(rowHybrid(row)).toFixed(1) + '</strong></span>');
   if (row.signal_type && row.signal_section !== 'regional_radar') metaParts.push('<span>' + escapeHtml(row.signal_type.toUpperCase()) + '</span>');
   if (row.event_name) metaParts.push('<span class="event-name">EVENT <strong>' + escapeHtml(row.event_name) + '</strong></span>');
 
@@ -3219,7 +3226,7 @@ function analyticsScoreForRow(r) {
   if (live.current_return_pct !== null && live.current_return_pct !== undefined && isFinite(live.current_return_pct)) return live.current_return_pct;
   return null;
 }
-function verdictOf(r) { return String((r && r.effective_verdict) || '').trim().toUpperCase(); }
+function verdictOf(r) { return String((r && rowVerdict(r)) || '').trim().toUpperCase(); }
 function isWaitRow(r) { return verdictOf(r) === 'WAIT'; }
 function valueList(rows, fn) {
   return (rows || []).map(fn).filter(function(v) { return v !== null && v !== undefined && isFinite(v); });
@@ -3854,7 +3861,7 @@ function quantVerdictRows(verdict) {
   // matches the tab counts. Win/return metrics below use only the graded subset,
   // so WAIT (ungraded by design) shows its real count with blank performance.
   return analyticsRowsForSource('fa').filter(function(r) {
-    return quantVerdict(r.quant_score) === verdict;
+    return quantVerdict(rowQuant(r)) === verdict;
   });
 }
 function computeQuantVerdictStats(verdict) {
@@ -3992,7 +3999,7 @@ function calFlag(r) {
   if (!L.ok || L.stance === 'ungraded') return '';
   var rs = L.stance_score;
   if (rs === null || rs === undefined || !isFinite(rs)) return '';
-  var q = numOrSentinel(r.quant_score, null);
+  var q = numOrSentinel(rowQuant(r), null);
   var c = numOrSentinel(r.conviction_pct, null);
   var highScore = (q !== null && q >= 7) || (c !== null && c >= 70);
   var lowScore = (q !== null && q < 5);
@@ -4034,9 +4041,9 @@ function signalToExportRow(r) {
     scope: sourceScope(r), section: r.signal_section, region: r.region,
     sig_type: r.signal_type, hold: r.holding_type, horizon: r.horizon_text,
     win_days: numOrSentinel(r.window_days, null), event: r.event_name,
-    direction: r.direction, verdict: r.effective_verdict, stance: L.stance,
-    conv: numOrSentinel(r.conviction_pct, null), quant: rnd(r.quant_score, 2), hybrid: rnd(r.hybrid_score, 2),
-    qverdict: quantVerdict(r.quant_score) || '', recon: r._reconstructed ? 1 : 0,
+    direction: r.direction, verdict: rowVerdict(r), stance: L.stance,
+    conv: numOrSentinel(r.conviction_pct, null), quant: rnd(rowQuant(r), 2), hybrid: rnd(rowHybrid(r), 2),
+    qverdict: quantVerdict(rowQuant(r)) || '', recon: r._reconstructed ? 1 : 0,
     px_call: rnd(r.price_at_call, 4),
     entry_px: rnd(L.entry_price, 4), entry_dt: L.entry_date,
     cur_px: rnd(L.current_price, 4), cur_dt: L.current_date,
@@ -4145,8 +4152,8 @@ function spearmanIC(pairs) {
 }
 function recScoreVal(r, key) {
   var v;
-  if (key === 'quant') v = r.quant_score;
-  else if (key === 'hybrid') v = r.hybrid_score;
+  if (key === 'quant') v = rowQuant(r);
+  else if (key === 'hybrid') v = rowHybrid(r);
   else if (key === 'v2q') v = r.v2_quant_score;
   else if (key === 'v2h') v = r.v2_hybrid_score;
   else if (key === 'conv') v = r.conviction_pct;
@@ -4696,7 +4703,7 @@ function renderCalibrationBlocks() {
   ], function(r) { return numOrSentinel(r.conviction_pct, null); });
   var quantBuckets = bucketStats(rows.filter(isFaRow), [
     {label:'<5.0', min:-Infinity, max:5}, {label:'5.0–5.9', min:5, max:6}, {label:'6.0–6.9', min:6, max:7}, {label:'7.0–7.9', min:7, max:8}, {label:'8.0+', min:8, max:Infinity}
-  ], function(r) { return numOrSentinel(r.quant_score, null); });
+  ], function(r) { return numOrSentinel(rowQuant(r), null); });
   return renderBucketTable('Conviction Calibration', convBuckets) + renderBucketTable('Quant Score Calibration', quantBuckets);
 }
 function renderQuantVerdictBlock() {
@@ -4722,7 +4729,7 @@ function computeAuditStats() {
   var skippedPriced = rows.filter(function(r) { return rowIsSkipped(r) && r.live && r.live.ok; }).length;
   var missingLive = signalRows.filter(function(r) { return !r.live || !r.live.ok; }).length;
   var dateMismatch = signalRows.filter(function(r) { return r.live && r.live.ok && r.report_date && r.live.current_date && r.report_date > r.live.current_date; }).length;
-  var missingVerdictFa = signalRows.filter(function(r) { return isFaRow(r) && !r.effective_verdict; }).length;
+  var missingVerdictFa = signalRows.filter(function(r) { return isFaRow(r) && !rowVerdict(r); }).length;
   var missingConv = signalRows.filter(function(r) { return r.conviction_pct === null || r.conviction_pct === undefined; }).length;
   var sameTickerDate = {};
   signalRows.forEach(function(r) {
@@ -5117,7 +5124,7 @@ async function loadCongressBook() {
 function renderDashboard() {
   var rows = state.rows;
   var topCount = rows.filter(function(r) { return r.signal_section === 'top5'; }).length;
-  var faCount = rows.filter(function(r) { return r.signal_section === 'top5' && r.quant_score !== null && r.quant_score !== undefined; }).length;
+  var faCount = rows.filter(function(r) { return r.signal_section === 'top5' && rowQuant(r) !== null && rowQuant(r) !== undefined; }).length;
   var radarCount = rows.filter(function(r) { return r.signal_section === 'regional_radar'; }).length;
   // Congress is its own book and All excludes it, so counting it in the All badge
   // advertised 2630 for a tab that shows 1525.
