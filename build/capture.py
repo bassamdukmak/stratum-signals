@@ -38,8 +38,19 @@ def capture(page_html):
     bench_block = page_html[page_html.index('var DEFAULT_BENCHMARKS'):page_html.index('function benchmarkForTicker')]
     benchmarks = set(re.findall(r"'([A-Z]+)'", bench_block))
 
+    def signals(columns):
+        return paged('signal_outcome?select=' + columns + '&order=report_date.desc,id.asc')
+    try:
+        signal_rows = signals(cols)
+    except urllib.error.HTTPError as e:
+        # ponytail: same fallback the page has in fetchSignals - the grader's re-basing
+        # columns land in parallel and PostgREST rejects the whole select until they do.
+        if e.code != 400:
+            raise
+        signal_rows = signals(cols.replace(',entry_basis_date,quote_at_call', ''))
+
     tables = {
-        'signal_outcome': paged('signal_outcome?select=' + cols + '&order=report_date.desc,id.asc'),
+        'signal_outcome': signal_rows,
         'daily_archive': paged('daily_archive?select=report_date,csv_data,report_text&order=report_date.asc'),
         'weekly_archive': json.loads(get('weekly_archive?select=week_key,created_at,weekly_scores,report_text&order=week_key.desc&limit=200')[1]),
         'monthly_archive': json.loads(get('monthly_archive?select=month_key,generated_at,monthly_scores,report_text&order=month_key.desc&limit=200')[1]),

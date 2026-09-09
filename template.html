@@ -606,7 +606,7 @@ var SNAPSHOT = __SNAPSHOT_JSON__;
 // Bumped by hand on every edit. Printed at the top of the load log so a browser
 // serving a stale copy of this file can be spotted immediately instead of being
 // mistaken for a fix that did not work.
-var DASHBOARD_BUILD = '2026-09-09.82';
+var DASHBOARD_BUILD = '2026-09-09.83';
 
 var LS_KEYS = 'stratum_signal_viewer_keys_v2';
 
@@ -1142,7 +1142,11 @@ var SIGNAL_COLUMNS = [
   'v2_quant_score', 'v2_hybrid_score', 'v2_effective_verdict',
   // prices the live return math reads
   'price_at_call', 'current_price', 'peak_price', 'peak_date', 'trough_price', 'trough_date',
-  'spy_return_pct'
+  'spy_return_pct',
+  // Written by the re-based grader (2026-09-08): price_at_call becomes the first store
+  // close >= report_date, entry_basis_date names that bar, quote_at_call keeps the vendor
+  // quote the report was written against.
+  'entry_basis_date', 'quote_at_call'
 ].join(',');
 
 // Measured on this machine: browsers pull this endpoint at roughly 12-50 KB/s while
@@ -1154,7 +1158,8 @@ var SIGNAL_COLUMNS = [
 // so without this bump today's cache would keep serving rows missing them and both export
 // columns would stay blank until the cache expired overnight. Third cache fossil this
 // session - a column change must always move the key.
-var LS_SIGNAL_CACHE = 'stratum_signal_viewer_signal_cache_v3';
+// v4: SIGNAL_COLUMNS gained entry_basis_date and quote_at_call (2026-09-08).
+var LS_SIGNAL_CACHE = 'stratum_signal_viewer_signal_cache_v4';
 
 // Keyed on date alone until 2026-09-04, same fossil the bars cache already hit once
 // (see LS_BARS_CACHE above): a same-day write to signal_outcome was invisible to a
@@ -1185,8 +1190,18 @@ async function fetchSignals(keys) {
     log('  ' + cached.length + ' rows from today\'s cache (0 network) — Refresh re-pulls');
     return cached;
   }
-  var rows = await fetchAllRows(keys, 'signal_outcome',
-    'select=' + SIGNAL_COLUMNS + '&order=report_date.desc,id.asc', 'signals');
+  var order = '&order=report_date.desc,id.asc';
+  var rows;
+  try {
+    rows = await fetchAllRows(keys, 'signal_outcome', 'select=' + SIGNAL_COLUMNS + order, 'signals');
+  } catch (e) {
+    // ponytail: the grader's re-basing migration is landing in parallel; until it does
+    // PostgREST rejects the whole select (42703) and the book would load blank. Drop this
+    // fallback once entry_basis_date/quote_at_call exist on prod.
+    log('  entry_basis_date/quote_at_call not in signal_outcome yet - loading without them');
+    rows = await fetchAllRows(keys, 'signal_outcome',
+      'select=' + SIGNAL_COLUMNS.replace(',entry_basis_date,quote_at_call', '') + order, 'signals');
+  }
   saveSignalCache(rows, storeVersion);
   return rows;
 }
@@ -1874,6 +1889,17 @@ function numOrSentinel(v, sentinel) {
   return isFinite(n) ? n : sentinel;
 }
 
+// The one unpriced reason the card words differently: not a data failure, just a call
+// newer than the price store. Shared so the banner and the export agree on the string.
+var NO_CLOSE_YET = 'no close on/after the call yet';
+
+// The vendor quote the report was written against - informational, never the basis.
+// A re-based row keeps it in quote_at_call; before re-basing, price_at_call is that quote.
+function quoteAtCall(row) {
+  var q = parseFloat(row.entry_basis_date ? row.quote_at_call : row.price_at_call);
+  return isFinite(q) ? q : null;
+}
+
 // ── Compute live state for one row ──
 function computeLive(row, priceResult) {
   var bars = priceResult ? priceResult.bars : [];
@@ -1916,27 +1942,26 @@ function computeLive(row, priceResult) {
     return last;
   }
 
-  var entry = row.price_at_call;
-  if (typeof entry === 'string') entry = parseFloat(entry);
-  if (!isFinite(entry)) entry = null;
-
-  // NO FALL-FORWARD. This used to read `lastBarOnOrBefore(rd) || latest`, so a ticker whose
-  // stored history begins AFTER the report date was priced from a future bar - a January
-  // call graded from a February open is look-ahead, not a fallback. When price_at_call
-  // exists the call still has a real entry; when it does not, the row is left unpriced
-  // rather than given an entry that did not exist yet.
-  var entryBar = lastBarOnOrBefore(rd);
-  var entryDate = entryBar ? entryBar.date : rd;
-
-  // If the report was generated on a weekend/holiday, the latest bar can be
-  // the previous trading day. Do not pretend the price came from the report
-  // date. This fixes cards like: report 2026-05-16, current date 2026-05-15.
-  if (entry === null && entryBar) entry = entryBar.close;
-  if (entry === null) {
-    out.live.data_error = 'no bar on or before ' + rd + ' and no price_at_call';
+  // ENTRY IS THE PUBLICATION-DAY CLOSE: the first stored bar on or after the report date,
+  // price and date from the SAME bar. The old form paired price_at_call (a vendor quote at
+  // generation time) with the date of the last bar BEFORE the call, so when the store had
+  // not reached the report date yet the row still computed a return - and it was the
+  // pre-call move, not the call's (19 rows on 2026-09-08: ROIV +16.83% short, NVS +14.32%
+  // long, store ending 09-04). No bar on/after the call means no return yet, full stop.
+  // Still no fall-forward past the call: a bar >= rd is the earliest the position exists.
+  var entryBar = null;
+  for (var eb = 0; eb < bars.length; eb++) if (bars[eb].date >= rd) { entryBar = bars[eb]; break; }
+  if (!entryBar) {
+    out.live.data_error = NO_CLOSE_YET;
     return out;
   }
-  if (currentDate < rd && entryBar) entryDate = entryBar.date;
+  var entry = entryBar.close, entryDate = entryBar.date;
+  // Once the grader has re-based a row, price_at_call IS that first close and
+  // entry_basis_date says which bar; prefer the stored pair so card and grader agree
+  // even if the store is later backfilled with a different bar.
+  if (row.entry_basis_date && isFinite(parseFloat(row.price_at_call))) {
+    entry = parseFloat(row.price_at_call); entryDate = row.entry_basis_date;
+  }
 
   var windowStart = entryDate || rd;
   // A no-window row (Regional Radar monitoring, congressional disclosures) has no horizon,
@@ -2358,7 +2383,7 @@ function congressRowFromTrade(t) {
         window_days: state.congressWindowDays,
         direction: stance.direction,
         effective_verdict: stance.verdict,
-        price_at_call: null,          // backfilled by computeLive from the bar on/before filing
+        price_at_call: null,          // computeLive enters at the first bar on/after filing
         conviction_pct: null, quant_score: null, hybrid_score: null,
         horizon_text: state.congressWindowDays ? (state.congressWindowDays + 'd window') : 'no window',
         holding_type: 'congress_disclosure', region: null,
@@ -2854,11 +2879,10 @@ function computePortfolioSeries(rows, barsByTicker) {
         // at +100% when the stock reaches zero — and inconsistent with the +75% the
         // card for that same call reports. This form agrees with the cards exactly.
         //
-        // On the position's FIRST session the basis is the price the report actually
-        // quoted, not the previous close. live.entry_price is price_at_call, which
-        // differs from the entry-day close on 21.6% of rows (avg 0.60%, max 29.79%),
-        // and measuring from the previous close silently discarded that opening move
-        // while the card kept it — so curve and card disagreed by exactly that gap.
+        // On the position's FIRST session the basis is live.entry_price itself, so the
+        // curve agrees with the card by construction. Since 2026-09-08 that entry is the
+        // publication-day close (the same bar as quote.prev), but a re-based row may carry
+        // a price_at_call the store no longer has, so the explicit form stays.
         var basis = (quote.prevDate <= p.start) ? p.entry : quote.prev;
         sum += p.sign * (quote.close - basis) / p.entry;
       }
@@ -3042,8 +3066,9 @@ function renderCardHtml(row) {
 
   var noDataBanner = '';
   if (!live.ok) {
-    var ndClass = live.price_skipped ? 'no-data info' : 'no-data';
-    var ndPrefix = live.price_skipped ? 'NO LIVE PRICE REQUIRED · ' : 'NO PRICE DATA · ';
+    var ndClass = live.price_skipped || live.data_error === NO_CLOSE_YET ? 'no-data info' : 'no-data';
+    var ndPrefix = live.price_skipped ? 'NO LIVE PRICE REQUIRED · '
+      : live.data_error === NO_CLOSE_YET ? 'AWAITING FIRST CLOSE · ' : 'NO PRICE DATA · ';
     noDataBanner = '<div class="' + ndClass + '">' + ndPrefix + escapeHtml(live.data_error || 'unknown') + '</div>';
   } else if (staleSince) {
     // Priced, but from a close that has stopped moving. Said out loud rather than left
@@ -3090,7 +3115,8 @@ function renderCardHtml(row) {
     + (metaParts.length ? '<div class="meta-row">' + metaParts.join('') + '</div>' : '')
     + noDataBanner
     + '<div class="price-block">'
-    +   '<div class="price-cell"><div class="lbl">Entry</div><div class="val">' + fmtPx(live.entry_price) + '</div><div class="sub">' + escapeHtml(live.entry_date || row.report_date) + '</div></div>'
+    +   '<div class="price-cell"><div class="lbl">Entry</div><div class="val">' + fmtPx(live.entry_price) + '</div><div class="sub">' + escapeHtml(live.entry_date || row.report_date) + '</div>'
+    +     (quoteAtCall(row) !== null ? '<div class="sub">quote at call ' + fmtPx(quoteAtCall(row)) + '</div>' : '') + '</div>'
     +   '<div class="price-cell price-chart-cell" data-ticker="' + escapeHtml(row.ticker) + '" data-entry-date="' + escapeHtml(chartEntryDate) + '" data-window-end="' + escapeHtml(chartWindowEnd) + '" title="Show price history"><div class="lbl">Current</div><div class="val">' + fmtPx(live.current_price) + '</div><div class="sub">' + (live.current_date ? escapeHtml(live.current_date) : '—') + '</div></div>'
     +   '<div class="price-cell"><div class="lbl">' + peakLbl + '</div><div class="val">' + fmtPx(peakPx) + '</div><div class="sub">' + (peakDate ? escapeHtml(peakDate) : '—') + '</div></div>'
     + '</div>'
@@ -3359,6 +3385,13 @@ function activeFiltersCaption() {
   parts.push(state.quantMode ? 'Quant only' : 'Hybrid');
   return parts.join(' · ');
 }
+// Answers "is this measuring the quant decision or the written recommendation" without
+// the reader having to know what the QUANT ONLY toggle does to computeGradeStance.
+function stanceRuleCaption() {
+  return state.quantMode
+    ? 'stance: quant engine (>=' + QUANT_BUY_MIN + ' long, <' + QUANT_SHORT_MAX + ' short), else report direction'
+    : 'stance: report direction';
+}
 function liveStatsFields(stats) {
   return [
     ['Signals', String(stats.signals)], ['Priced', String(stats.priced)], ['Graded', String(stats.graded)],
@@ -3424,6 +3457,8 @@ function liveStatsCsv(caption, fields, rows) {
   var lines = [];
   lines.push('# Stratum live stat sheet');
   lines.push('# Active filters,' + csvCell(caption));
+  lines.push('# Stance rule,' + csvCell(stanceRuleCaption()));
+  if (state.latestOnly) lines.push('# Editions,latest call per ticker; toggle OLDEST ONLY / neither for full history');
   lines.push('# Generated,' + csvCell(new Date().toISOString().replace(/\.\d+Z$/, 'Z')));
   lines.push('');
   lines.push('## Summary');
@@ -3805,7 +3840,7 @@ function renderLiveStats() {
   var layout = liveStatsLayout(stats);
   mount.innerHTML = '<div class="live-stats-head"><div class="live-stats-title">Live Stat Sheet</div>'
     + '<button class="action-btn" id="live-stats-download" type="button">Download CSV</button></div>'
-    + '<div class="live-stats-caption">' + escapeHtml(caption) + '</div>'
+    + '<div class="live-stats-caption">' + escapeHtml(caption) + '<br>' + escapeHtml(stanceRuleCaption()) + '</div>'
     + '<div class="live-stats-counts">' + layout.counts.map(function(count) {
         return '<b>' + escapeHtml(count[1]) + '</b> ' + escapeHtml(count[0]);
       }).join(' &middot; ') + '</div>'
@@ -4049,7 +4084,7 @@ function signYesNo(v) {
 
 var SIGNAL_BASE_COLS = [
   'id','ticker','date','scope','section','region','sig_type','hold','horizon','win_days','event',
-  'direction','verdict','stance','conv','quant','hybrid','qverdict','recon','px_call',
+  'direction','verdict','stance','conv','quant','hybrid','qverdict','recon','px_call','quote_at_call',
   'entry_px','entry_dt','cur_px','cur_dt','peak_px','peak_dt','trough_px','trough_dt',
   'ret_now','ret_stance','ret_best','max_pain','days_to_pos','outcome',
   'bench','ret_spy','ret_qqq','ret_bench','vs_spy','vs_qqq','vs_bench','beat_bench',
@@ -4066,7 +4101,7 @@ var SIGNAL_BASE_COLS = [
 var SIGNAL_KNOWN_RAW = {
   id:1, ticker:1, report_date:1, signal_section:1, region:1, signal_type:1, holding_type:1,
   window_days:1, event_name:1, direction:1, effective_verdict:1, conviction_pct:1, quant_score:1,
-  hybrid_score:1, price_at_call:1, status:1, horizon_text:1, created_at:1, updated_at:1, live:1
+  hybrid_score:1, price_at_call:1, entry_basis_date:1, quote_at_call:1, status:1, horizon_text:1, created_at:1, updated_at:1, live:1
 };
 
 function signalToExportRow(r) {
@@ -4079,7 +4114,7 @@ function signalToExportRow(r) {
     direction: r.direction, verdict: rowVerdict(r), stance: L.stance,
     conv: numOrSentinel(r.conviction_pct, null), quant: rnd(rowQuant(r), 2), hybrid: rnd(rowHybrid(r), 2),
     qverdict: quantVerdict(rowQuant(r)) || '', recon: r._reconstructed ? 1 : 0,
-    px_call: rnd(r.price_at_call, 4),
+    px_call: rnd(r.price_at_call, 4), quote_at_call: rnd(quoteAtCall(r), 4),
     entry_px: rnd(L.entry_price, 4), entry_dt: L.entry_date,
     cur_px: rnd(L.current_price, 4), cur_dt: L.current_date,
     peak_px: rnd(L.peak_price, 4), peak_dt: L.peak_date,
@@ -4127,10 +4162,10 @@ function buildSignalLegend() {
     'section: raw signal_section | region: geo (radar) | sig_type: signal category | hold: holding_type | horizon: human horizon | win_days: intended window (days) | event: catalyst name',
     '# — decision & scores (MODEL INPUTS) —',
     'direction: bullish|bearish|neutral | verdict: BUY|BUILD SLOWLY|WAIT|AVOID|SELL | stance: long|short|ungraded(WAIT)',
-    'conv: conviction % 0-100 | quant: FA quant_score ~0-10 | hybrid: blended score ~0-10 | px_call: price stated at call',
+    'conv: conviction % 0-100 | quant: FA quant_score ~0-10 | hybrid: blended score ~0-10 | px_call: stored price_at_call (the publication-day close once the grader has re-based the row, the vendor quote before) | quote_at_call: the vendor quote the report was written against - informational, never the basis',
     'qverdict: quant-only verdict derived from quant (BUY if quant>=' + QUANT_BUY_MIN + ', SHORT if quant<' + QUANT_SHORT_MAX + ', else WAIT; ""=no quant_score) | recon: 1=quant_score reconstructed point-in-time, 0=live DB score',
     '# — prices (live, Twelve Data) —',
-    'entry_px/entry_dt: effective entry (price_at_call; backfilled to the LAST valid bar ON OR BEFORE the report date when absent) | cur_px/cur_dt: MARK price+date - the latest close while the window is open, the last close inside the window once it has expired | peak_px/peak_dt: max close in window (entry included) | trough_px/trough_dt: min close in window (entry included)',
+    'entry_px/entry_dt: the BASIS - price and date of the FIRST stored close ON OR AFTER the report date (entry_basis_date when the grader wrote one); a call with no such bar yet is unpriced, never graded against the pre-call move | cur_px/cur_dt: MARK price+date - the latest close while the window is open, the last close inside the window once it has expired | peak_px/peak_dt: max close in window (entry included) | trough_px/trough_dt: min close in window (entry included)',
     '# — outcome (MODEL RESULTS — compare vs scores) —',
     'ret_now: raw price move since entry % (sign=price dir, ignores stance) | ret_stance: STANCE-ADJUSTED return % — the grade: >0=call right, <0=call wrong (a stock that FALLS after AVOID scores POSITIVE)',
     'ret_best: best achievable move in window given stance %, never below 0 (entry is always reachable) | max_pain: worst adverse move vs the call %, never above 0 | days_to_pos: CALENDAR days from entry until the call first turned positive',
